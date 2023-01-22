@@ -1,0 +1,5 @@
+FROM alpine
+
+COPY pow_client.sh /words_of_wisdom/
+
+ENTRYPOINT ["/words_of_wisdom_tcp/pow_client.sh"]
