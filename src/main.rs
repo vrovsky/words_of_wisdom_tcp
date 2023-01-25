@@ -1,121 +1,94 @@
-use rand::Rng;
 use sha2::{Digest, Sha256};
-use std::fs::File;
 use std::collections::HashMap;
-use std::io::BufRead;
-use std::io::BufReader;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
-const DIFFICULTY: u32 = 4;
-const MAX_NONCE: u64 = 1_000_000;
-const MAX_REQUESTS_PER_IP: u32 = 100;
-const BAN_TIME: u64 = 60;
-
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:5000").unwrap();
-    let mut banned_ips: HashMap<String, u64> = HashMap::new();
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let addr = stream.peer_addr().unwrap();
-                let ip = addr.ip().to_string();
-                let ban_end = banned_ips.get(&ip);
-
-                if ban_end.is_some() && ban_end.unwrap() > &Instant::now().elapsed().as_secs() {
-                    println!(
-                        "Client {} is banned for {} sec",
-                        ip,
-                        ban_end.unwrap() - Instant::now().elapsed().as_secs()
-                    );
-                } else if !handle_rate_limit(ip.clone(), &mut banned_ips) {
-                    println!(
-                        "Client {} has exceeded the maximum number of requests per IP",
-                        ip
-                    );
-                } else if !handle_pow(ip.clone()) {
-                    println!("Client {} failed to complete PoW challenge", ip.clone());
-                } else {
-                    handle_client(stream);
-                }
-            }
-            Err(e) => {
-                println!("Error: {}", e);
-            }
+fn proof_of_work(challenge: &str, difficulty: u8) -> String {
+    let salt = rand::random::<u128>().to_string();
+    let solution = challenge.to_owned() + &salt;
+    let hash = Sha256::digest(solution.as_bytes());
+    if hash.iter().take(difficulty as usize).all(|b| *b == 0) {
+        return salt;
+    }
+    let mut leading_zeros = 0;
+    for (i, byte) in hash.iter().rev().enumerate() {
+        if *byte != 0 {
+            break;
         }
+        leading_zeros += i * 8;
     }
-}
-
-fn handle_rate_limit(ip: String, banned_ips: &mut HashMap<String, u64>) -> bool {
-    let ban_end = banned_ips.get(&ip);
-
-    if ban_end.is_some() {
-        return ban_end.unwrap() < &Instant::now().elapsed().as_secs();
+    if leading_zeros >= difficulty.into() {
+        return salt;
     }
-
-    let mut requests = 0;
-
-    if !banned_ips.contains_key(&ip) {
-        banned_ips.insert(ip.clone(), 0);
-    } else {
-        requests = *banned_ips.get(&ip).unwrap();
-    }
-
-    if requests >= MAX_REQUESTS_PER_IP.into() {
-        banned_ips.insert(ip, Instant::now().elapsed().as_secs() + BAN_TIME);
-        return false;
-    } else {
-        banned_ips.insert(ip, requests + 1);
-        return true;
-    }
-}
-
-fn handle_pow(ip: String) -> bool {
-    let nonce = rand::random::<u64>() % MAX_NONCE;
-    let challenge = format!("{}{}", ip, nonce);
-    let digest = Sha256::digest(challenge.as_bytes());
-    let digest_str = format!("{:x}", digest);
-    for i in 0..DIFFICULTY {
-        if digest_str.chars().nth(i as usize) != Some('0') {
-            return false;
-        }
-    }
-    return true;
+    return String::new();
 }
 
 fn handle_client(mut stream: TcpStream) {
-    let wisdom_book = "../wisdom_book.txt";
-    let wisdom = generate_wisdom(wisdom_book);
-    let mut buffer = [0; 512];
-    match stream.read(&mut buffer) {
-        Ok(_) => println!("Received: {}", String::from_utf8_lossy(&buffer)),
-        Err(e) => println!("Error reading stream: {}", e),
+    let challenge = "Please solve this POW to prove that you are not a bot: ";
+    stream.write(challenge.as_bytes()).unwrap();
+
+    let mut buf = [0; 256];
+    let bytes_read = stream.read(&mut buf[..]).unwrap();
+    let solution = std::str::from_utf8(&buf[..bytes_read]).unwrap();
+
+    let difficulty = 8;
+    let expected_solution = proof_of_work(challenge, difficulty);
+    if solution != expected_solution {
+        stream.write("Invalid solution".as_bytes()).unwrap();
+        return;
     }
 
-    match stream.write(wisdom.as_bytes()) {
-        Ok(_) => println!("Sent: {}", wisdom),
-        Err(e) => println!("Error writing to stream: {}", e),
-    }
+    let quotes = vec![
+            "\"The glory of God is intelligence.\" - D&C 93:36",
+            "\"And if your eye be single to my glory, your whole bodies shall be filled with light, and there shall be no darkness in you.\" - D&C 88:67",
+            "\"And whatsoever ye shall ask the Father in my name, which is right, believing that ye shall receive, behold it shall be given unto you.\" - 3 Nephi 18:20",
+        ];
+    let quote = quotes[rand::random::<usize>() % quotes.len()];
+    stream.write(quote.as_bytes()).unwrap();
 }
 
-fn generate_wisdom(file_path: &str) -> String {
-    let file = match File::open(file_path) {
-        Ok(file) => file,
-        Err(e) => {
-            println!("Failed to open wisdom book: {}", e);
-            return "Error: Failed to open wisdom book.".to_string();
+fn main() {
+    let listener = TcpListener::bind("127.0.0.1:8000").unwrap();
+    let mut client_requests: HashMap<TcpStream, Instant> = HashMap::new();
+    let request_timeout = Duration::from_secs(60);
+    let mut connection_count = 0;
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if connection_count >= 10 {
+                    stream  
+                        .write(
+                            "Too many connections at the moment, please try again later".as_bytes(),
+                        )
+                        .unwrap();
+                    continue;
+                }
+                let current_time = Instant::now();
+                if let Some(last_request_time) = client_requests.get(&stream) {
+                    if current_time.duration_since(*last_request_time) < request_timeout {
+                        stream
+                            .write("Too many requests, please try again later".as_bytes())
+                            .unwrap();
+                        continue;
+                    }
+                }
+                let client_request = client_requests.get(&stream).unwrap();
+                if !client_request.is_valid() {
+                    stream
+                        .write("Invalid request, please try again".as_bytes())
+                        .unwrap();
+                    continue;
+                }
+                connection_count += 1;
+                client_requests.insert(stream.into().try_clone().unwrap(), current_time);
+                thread::spawn(move || {
+                    handle_client(stream);
+                    connection_count -= 1;
+                });
+            }
+            Err(e) => println!("Error: {}", e),
         }
-    };
-
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().map(|line| line.unwrap()).collect();
-
-    if lines.is_empty() {
-        return "Error: Wisdom book is empty.".to_string();
-    } else {
-        let random_index = rand::thread_rng().gen_range(0..lines.len());
-        return lines[random_index].to_string();
     }
 }

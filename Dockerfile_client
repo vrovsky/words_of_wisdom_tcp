@@ -1,5 +1,7 @@
-FROM alpine
+FROM rust:latest
 
-COPY pow_client.sh /words_of_wisdom/
+COPY . .
 
-ENTRYPOINT ["/words_of_wisdom_tcp/pow_client.sh"]
+RUN cargo build --release
+
+CMD ["./client/target/release/client"]
